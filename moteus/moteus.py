@@ -10,9 +10,31 @@ from typing import Dict
 from msg import ArmOpenLoopCmd
 from enum import Enum
 
-class State(Enum):
-    OFF = 0
-    ON = 1
+class MoteusEvent(Enum):
+    TURN_OFF = 0
+    TURN_ON = 1
+
+class State(object):
+    def __init__(self) -> None:
+        print("Processing current state:", str(self))
+
+    def on_event(self, event: MoteusEvent, controller: Controller):
+        """Handles events that are delegated to this State."""
+
+class OnState(State):
+
+    def on_event(self, event: MoteusEvent, controller: Controller) -> State:
+        if event == MoteusEvent.TURN_OFF:
+            controller.turn_off()
+            return OffState()
+        return self
+
+class OffState(State):
+    def on_event(self, event: MoteusEvent, controller: Controller) -> State:
+        if event == MoteusEvent.TURN_ON:
+            controller.turn_on()
+            return OnState()
+        return self
 
 
 class ControlData:
@@ -54,15 +76,12 @@ class ControlData:
 class Controller:
 
     def __init__(self, can_id, inversion) -> None:
-        # NOTE: online it says that it connects to an arbitrary can port, prioritizing 
-        # the fdcanbus. So I'd assume if we just hooked up can, it would just connect to that.
-        # We can explore this later.
         self.id = can_id
         self.c = None
         self.inversion = inversion
         self.query_data = None
         self.control_data = ControlData()
-        self.state = State.OFF
+        self.state = OffState()
 
     def __enter__(self):
         self.turn_on()
@@ -84,15 +103,16 @@ class Controller:
             )
 
     def turn_off(self) -> None:
-        assert(self.state == State.ON)
-        self.state = State.OFF
+        # this also clears errors
         self.c.make_stop()
+        self.control_data.set_velocity(0.0)
 
     def turn_on(self) -> None:
-        assert(self.state == State.OFF)
-        # TODO - turn the state into an event kind of thing
-        self.state = State.ON
+        # NOTE: online it says that it connects to an arbitrary can port, prioritizing 
+        # the fdcanbus. So I'd assume if we just hooked up can, it would just connect to that.
+        # We can explore this later.
         self.c = moteus.Controller(id=can_id)
+        self.control_data.set_velocity(0.0)
 
     def print_position(self) -> None:
         print("Position: ", self.query_data.values[moteus.Register.POSITION])
@@ -100,16 +120,38 @@ class Controller:
     def print_velocity(self) -> None:
         print("Velocity: ", self.query_data.values[moteus.Register.VELOCITY])
 
+    def has_errors(self) -> bool:
+        fault_value = state.values[moteus.Register.FAULT]
+        return fault_value != 0
+
+
+class MoteusBridge:
+    def __init__(self, name, id, inversion) -> None:
+        self.state = OnState()
+        self.name = name
+        self.controller = Controller(controller_id, controller_inversion)
+
+    def update(self) -> None:
+        if str(self.state) == "OnState":
+            try:
+                errors = self.controller.has_errors()
+
+            if errors:
+                self.state.on_event(ODriveEvent.TURN_OFF, self.controller)
+                return
+        else:
+            self.state.on_event(ODriveEvent.TURN_ON, self.controller)  
+
 
 class ControllerMap:
     live_controller_name_by_id: Dict[int, str]
     id_by_controller_name: Dict[str, int]
-    controller_object_by_controller_name: Dict[str, Controller]
+    moteus_bridge_by_controller_name: Dict[str, MoteusBridge]
 
     def __init__(self) -> None:
         self.live_controller_name_by_id = {}
         self.id_by_controller_name = {}
-        self.controller_object_by_controller_name = {}
+        self.moteus_bridge_by_controller_name = {}
 
         list_of_controllers = rospy.get_param("/motors/controllers")
 
@@ -118,8 +160,8 @@ class ControllerMap:
             controller_id = controller[id]
             controller_inversion = controller_inversion
             id_by_controller_name[controller_name] = controller_id
-            controller_object_by_controller_name[controller_id] = (
-                Controller(controller_id, controller_inversion)
+            moteus_bridge_by_controller_name[controller_id] = (
+                MoteusBridge(controller_name, controller_id, controller_inversion)
             )
 
     def is_controller_live(self, name) -> bool:
@@ -133,38 +175,40 @@ class ROSHandler:
 
     def __init__(self) -> None:
         self.controller_map = ControllerMap()
-        self.moteus_bridge = MoteusBridge()
         self.start_time = time.process_time()
         rospy.Subscriber("arm_open_loop_cmd", ArmOpenLoopCmd, self.arm_open_loop_cmd_callback)
 
     def update_all_controllers(self) -> None:
         for can_id in self.controller_map.live_controller_name_by_id:
             controller_name = self.controller_map.live_controller_name_by_id[can_id]
+            moteus_bridge_object = self.controller_map.moteus_bridge_by_controller_name[controller_name]
+
             lost_comms = time.process_time() - self.start_time > 1.0
             if lost_comms:
-                self.set_controller_velocity(name, 0.0)
-            self.controller_map.controller_object_by_controller_name[controller_name].update()
+                moteus_bridge_object.state.on_event(MoteusEvent.TURN_OFF)
+            moteus_bridge_object.update()
+
 
     def set_controller_torque(name, torque) -> None:
         if not self.controller_map.is_controller_live(name):
             self.controller_map.make_live(name)
-        self.controller_map.controller_object_by_controller_name.control_data.set_torque(tor=torque)
+        self.controller_map.moteus_bridge_by_controller_name.control_data.set_torque(tor=torque)
 
     def set_controller_velocity(name, velocity) -> None:
         if not self.controller_map.is_controller_live(name):
             self.controller_map.make_live(name)
-        self.controller_map.controller_object_by_controller_name.control_data.set_velocity(vel=velocity)
+        self.controller_map.moteus_bridge_by_controller_name.control_data.set_velocity(vel=velocity)
 
     def set_controller_position(name, position) -> None:
         if not self.controller_map.is_controller_live(name):
             self.controller_map.make_live(name)
-        self.controller_map.controller_object_by_controller_name.control_data.set_position(pos=position)
+        self.controller_map.moteus_bridge_by_controller_name.control_data.set_position(pos=position)
 
     def arm_open_loop_cmd_callback(self, ros_msg: ArmOpenLoopCmd) -> None:
         arm_names = ["ARM_A", "ARM_B", "ARM_C", "ARM_D", "ARM_E", "ARM_F"]
         for index, name in enumerate(arm_names):
             self.controller_map.make_live(name) 
-            self.controller_map.controller_object_by_controller_name[name].set_velocity(ros_msg.throttle[index])
+            self.controller_map.moteus_bridge_by_controller_name[name].set_velocity(ros_msg.throttle[index])
 
 def main():
     ros_handler = ROSHandler()
