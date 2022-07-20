@@ -122,6 +122,14 @@ class State(object):
     def on_event(self, event: MoteusEvent, controller: Controller):
         """Handles events that are delegated to this State."""
 
+    def __repr__(self) -> str:
+        """Makes it so __str__ method can describe the State."""
+        return self.__str__()
+
+    def __str__(self) -> str:
+        """Returns the name of the State."""
+        return self.__class__.__name__
+
 
 class OnState(State):
 
