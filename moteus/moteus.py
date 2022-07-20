@@ -1,43 +1,29 @@
 #!/usr/bin/env python3
 
-import time
 import math
+import time
+from enum import Enum
+from typing import Dict
 
 import moteus
-import moteus_pi3hat
+import rospy
 
-from typing import Dict
 from msg import ArmOpenLoopCmd
-from enum import Enum
+
 
 class MoteusEvent(Enum):
     TURN_OFF = 0
     TURN_ON = 1
 
-class State(object):
-    def __init__(self) -> None:
-        print("Processing current state:", str(self))
-
-    def on_event(self, event: MoteusEvent, controller: Controller):
-        """Handles events that are delegated to this State."""
-
-class OnState(State):
-
-    def on_event(self, event: MoteusEvent, controller: Controller) -> State:
-        if event == MoteusEvent.TURN_OFF:
-            controller.turn_off()
-            return OffState()
-        return self
-
-class OffState(State):
-    def on_event(self, event: MoteusEvent, controller: Controller) -> State:
-        if event == MoteusEvent.TURN_ON:
-            controller.turn_on()
-            return OnState()
-        return self
-
 
 class ControlData:
+
+    position: float
+    velocity: float
+    max_torque: float
+    ff_torque: float
+    kp_scale: float
+    kd_scale: float
 
     def __init__(self) -> None:
         self.position = math.nan
@@ -75,13 +61,18 @@ class ControlData:
 
 class Controller:
 
+    id: int
+    c: moteus.Controller
+    inversion: int
+    query_data: moteus.cmd
+    control_data: ControlData
+
     def __init__(self, can_id, inversion) -> None:
         self.id = can_id
         self.c = None
         self.inversion = inversion
         self.query_data = None
         self.control_data = ControlData()
-        self.state = OffState()
 
     def __enter__(self):
         self.turn_on()
@@ -90,17 +81,16 @@ class Controller:
         self.turn_off()
 
     def update(self) -> None:
-        if self.state == State.ON:
-            self.query_data = self.c.make_position(
-                position=self.control_data.position,
-                velocity=self.control_data.velocity * inversion,
-                feedforward_torque=self.control_data.ff_torque,
-                kp_scale=self.control_data.kp_scale,
-                kd_scale=self.control_data.kd_scale,
-                maximum_torque=self.control_data.max_torque,
-                watchdog_timeout=10,
-                query=True,
-            )
+        self.query_data = self.c.make_position(
+            position=self.control_data.position,
+            velocity=self.control_data.velocity * self.inversion,
+            feedforward_torque=self.control_data.ff_torque,
+            kp_scale=self.control_data.kp_scale,
+            kd_scale=self.control_data.kd_scale,
+            maximum_torque=self.control_data.max_torque,
+            watchdog_timeout=10,
+            query=True,
+        )
 
     def turn_off(self) -> None:
         # this also clears errors
@@ -108,10 +98,10 @@ class Controller:
         self.control_data.set_velocity(0.0)
 
     def turn_on(self) -> None:
-        # NOTE: online it says that it connects to an arbitrary can port, prioritizing 
+        # NOTE: online it says that it connects to an arbitrary can port, prioritizing
         # the fdcanbus. So I'd assume if we just hooked up can, it would just connect to that.
         # We can explore this later.
-        self.c = moteus.Controller(id=can_id)
+        self.c = moteus.Controller(id=self.can_id)
         self.control_data.set_velocity(0.0)
 
     def print_position(self) -> None:
@@ -121,26 +111,55 @@ class Controller:
         print("Velocity: ", self.query_data.values[moteus.Register.VELOCITY])
 
     def has_errors(self) -> bool:
-        fault_value = state.values[moteus.Register.FAULT]
+        fault_value = self.query_data.values[moteus.Register.FAULT]
         return fault_value != 0
 
 
+class State(object):
+    def __init__(self) -> None:
+        print("Processing current state:", str(self))
+
+    def on_event(self, event: MoteusEvent, controller: Controller):
+        """Handles events that are delegated to this State."""
+
+
+class OnState(State):
+
+    def on_event(self, event: MoteusEvent, controller: Controller) -> State:
+        if event == MoteusEvent.TURN_OFF:
+            controller.turn_off()
+            return OffState()
+        return self
+
+
+class OffState(State):
+    def on_event(self, event: MoteusEvent, controller: Controller) -> State:
+        if event == MoteusEvent.TURN_ON:
+            controller.turn_on()
+            return OnState()
+        return self
+
+
 class MoteusBridge:
+
+    state: State
+    name: str
+    controller: Controller
+
     def __init__(self, name, id, inversion) -> None:
         self.state = OnState()
         self.name = name
-        self.controller = Controller(controller_id, controller_inversion)
+        self.controller = Controller(id, inversion)
 
     def update(self) -> None:
         if str(self.state) == "OnState":
-            try:
-                errors = self.controller.has_errors()
+            errors = self.controller.has_errors()
 
             if errors:
-                self.state.on_event(ODriveEvent.TURN_OFF, self.controller)
+                self.state.on_event(MoteusEvent.TURN_OFF, self.controller)
                 return
         else:
-            self.state.on_event(ODriveEvent.TURN_ON, self.controller)  
+            self.state.on_event(MoteusEvent.TURN_ON, self.controller)
 
 
 class ControllerMap:
@@ -156,22 +175,25 @@ class ControllerMap:
         list_of_controllers = rospy.get_param("/motors/controllers")
 
         for controller in list_of_controllers:
-            controller_name = controller[name]
-            controller_id = controller[id]
-            controller_inversion = controller_inversion
-            id_by_controller_name[controller_name] = controller_id
-            moteus_bridge_by_controller_name[controller_id] = (
+            controller_name = controller["name"]
+            controller_id = controller["id"]
+            controller_inversion = controller["controller_inversion"]
+            self.id_by_controller_name[controller_name] = controller_id
+            self.moteus_bridge_by_controller_name[controller_id] = (
                 MoteusBridge(controller_name, controller_id, controller_inversion)
             )
 
     def is_controller_live(self, name) -> bool:
-        return name == live_controller_name_by_id[id_by_controller_name[name]]
+        return name == self.live_controller_name_by_id[self.id_by_controller_name[name]]
 
     def make_live(self, name) -> None:
-        live_controller_name_by_id[id_by_controller_name[name]] = name
+        self.live_controller_name_by_id[self.id_by_controller_name[name]] = name
 
 
 class ROSHandler:
+
+    controller_map: ControllerMap
+    start_time: float
 
     def __init__(self) -> None:
         self.controller_map = ControllerMap()
@@ -188,27 +210,27 @@ class ROSHandler:
                 moteus_bridge_object.state.on_event(MoteusEvent.TURN_OFF)
             moteus_bridge_object.update()
 
-
-    def set_controller_torque(name, torque) -> None:
+    def set_controller_torque(self, name, torque) -> None:
         if not self.controller_map.is_controller_live(name):
             self.controller_map.make_live(name)
-        self.controller_map.moteus_bridge_by_controller_name.control_data.set_torque(tor=torque)
+        self.controller_map.moteus_bridge_by_controller_name[name].controller.control_data.set_torque(tor=torque)
 
-    def set_controller_velocity(name, velocity) -> None:
+    def set_controller_velocity(self, name, velocity) -> None:
         if not self.controller_map.is_controller_live(name):
             self.controller_map.make_live(name)
-        self.controller_map.moteus_bridge_by_controller_name.control_data.set_velocity(vel=velocity)
+        self.controller_map.moteus_bridge_by_controller_name[name].controller.control_data.set_velocity(vel=velocity)
 
-    def set_controller_position(name, position) -> None:
+    def set_controller_position(self, name, position) -> None:
         if not self.controller_map.is_controller_live(name):
             self.controller_map.make_live(name)
-        self.controller_map.moteus_bridge_by_controller_name.control_data.set_position(pos=position)
+        self.controller_map.moteus_bridge_by_controller_name[name].controller.control_data.set_position(pos=position)
 
     def arm_open_loop_cmd_callback(self, ros_msg: ArmOpenLoopCmd) -> None:
         arm_names = ["ARM_A", "ARM_B", "ARM_C", "ARM_D", "ARM_E", "ARM_F"]
         for index, name in enumerate(arm_names):
-            self.controller_map.make_live(name) 
-            self.controller_map.moteus_bridge_by_controller_name[name].set_velocity(ros_msg.throttle[index])
+            self.controller_map.make_live(name)
+            self.controller_map.moteus_bridge_by_controller_name[name].controller.set_velocity(ros_msg.throttle[index])
+
 
 def main():
     ros_handler = ROSHandler()
