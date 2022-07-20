@@ -5,19 +5,10 @@ import math
 
 import moteus
 import moteus_pi3hat
-import time
 
-from dataclasses import dataclass
+from typing import Dict
 
-
-@dataclass
 class ControlData:
-    """Stores video info information by keeping track of the arguments and
-    endpoint that is needed to create jetson.utils objects.
-    :var arguments: A list of strings that is needed for the jetson.utils
-        objects' capture arguments.
-    :var current_endpoint: A string that is endpoint it is assigned to.
-    """
 
     def __init__(self) -> None:
         self.position = math.nan
@@ -83,6 +74,23 @@ class Controller:
 
     def print_velocity(self) -> None:
         print("Velocity: ", self.state.values[moteus.Register.VELOCITY])
+
+
+class ControllerMap:
+    live_controller_name_by_id: Dict[int, str]
+    id_by_controller_name: Dict[str, int]
+    controller_object_by_controller_name: Dict[str, Controller]
+
+    def __init__(self) -> None:
+        self.live_controller_name_by_id = {}
+        self.id_by_controller_name = {}
+        self.controller_object_by_controller_name = {}
+
+    def check_if_live(self, name) -> bool:
+        return name == live_controller_name_by_id[id_by_controller_name[name]]
+
+    def make_live(self, name) -> None:
+        live_controller_name_by_id[id_by_controller_name[name]] = name
 
 
 class MoteusBridge:
