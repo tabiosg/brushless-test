@@ -19,35 +19,40 @@ class ControlData:
         self.kd_scale = 1.0
         self.set_velocity(0.0)
 
-    def set_position(self, input_pos) -> None:
-        self.position = input_pos
-        self.velocity = 0.0
-        self.max_torque = 0.5
-        self.ff_torque = 0.0
-        self.kp_scale = 1.0
-        self.kd_scale = 1.0
+    def set_position(self, pos, vel=0.0, max_tor=0.5, ff_tor=0.0, kp=1.0, kd=1.0) -> None:
+        self.position = pos
+        self.velocity = vel
+        self.max_torque = max_tor
+        self.ff_torque = ff_tor
+        self.kp_scale = kp
+        self.kd_scale = kd
 
-    def set_velocity(self, input_vel) -> None:
+    def set_velocity(self, vel=0.0, max_tor=0.5, ff_tor=0.0, kd=1.0) -> None:
         self.position = math.nan
-        self.velocity = input_vel
-        self.max_torque = 0.5
-        self.ff_torque = 0.0
+        self.velocity = vel
+        self.max_torque = max_tor
+        self.ff_torque = ff_tor
         self.kp_scale = 0.0
-        self.kd_scale = 1.0
+        self.kd_scale = kd
 
-    def set_torque(self, input_torque) -> None:
+    def set_torque(self, tor=0.0) -> None:
         self.position = math.nan
         self.velocity = 0
-        self.max_torque = abs(input_torque)
-        self.ff_torque = input_torque
+        self.max_torque = abs(tor)
+        self.ff_torque = tor
         self.kp_scale = 0.0
         self.kd_scale = 0.0
 
 
 class Controller:
 
-    def __init__(self, servo_id) -> None:
+    def __init__(self, servo_id, inversion) -> None:
+        # NOTE: online it says that it connects to an arbitrary can port, prioritizing 
+        # the fdcanbus. So I'd assume if we just hooked up can, it would just connect to that.
+        # We can explore this later.
+        self.id = servo_id
         self.c = moteus.Controller(id=servo_id)
+        self.inversion = inversion
         self.state = None
         self.control_data = ControlData()
 
@@ -58,9 +63,12 @@ class Controller:
         self.c.make_stop()
 
     def update(self) -> None:
+        # TODO - add watchdog
+        # TODO - add a don't do anything state (after stop is called)
+
         self.state = self.c.make_position(
             position=self.control_data.position,
-            velocity=self.control_data.velocity,
+            velocity=self.control_data.velocity * inversion,
             feedforward_torque=self.control_data.ff_torque,
             kp_scale=self.control_data.kp_scale,
             kd_scale=self.control_data.kd_scale,
@@ -86,111 +94,52 @@ class ControllerMap:
         self.id_by_controller_name = {}
         self.controller_object_by_controller_name = {}
 
-    def check_if_live(self, name) -> bool:
+        list_of_controllers = rospy.get_param("/motors/controllers")
+
+        for controller in list_of_controllers:
+            controller_name = controller[name]
+            controller_id = controller[id]
+            controller_inversion = controller_inversion
+            id_by_controller_name[controller_name] = controller_id
+            controller_object_by_controller_name[controller_id] = (
+                Controller(controller_id, controller_inversion)
+            )
+
+    def is_controller_live(self, name) -> bool:
         return name == live_controller_name_by_id[id_by_controller_name[name]]
 
     def make_live(self, name) -> None:
         live_controller_name_by_id[id_by_controller_name[name]] = name
 
 
-class MoteusBridge:
-    """This will control the behavior of the Moteus"""
+class ROSHandler:
 
     def __init__(self) -> None:
-        """
-        Initialize the components.
-        Start with a Default State
-        """
-        ids = [1, 0, 0, 0, 0]  # 0 means nothing 
+        self.controller_map = ControllerMap()
+        self.moteus_bridge = MoteusBridge()
 
-        # This holds the controller object
-        self.servos = [
-            Controller(ids[0]),
-            Controller(ids[1]),
-            Controller(ids[2]),
-            Controller(ids[3]),
-            Controller(ids[4]),
-        ]
+    def update_all_controllers(self) -> None:
+        for can_id in self.controller_map.live_controller_name_by_id:
+            controller_name = self.controller_map.live_controller_name_by_id[can_id]
+            self.controller_map.controller_object_by_controller_name[controller_name].update()
 
-    def test_velocity(self) -> None:
-        velocities = [0.2, 0.0, -0.2, 0.0]
-        for i in range(5):
-            for velocity in velocities:
-                for servo in servos:
-                    servo.set_velocity(velocity)
-                for j in range(50):
-                    for servo in servos:
-                        servo.update()
-                    sleep(0.02)
+    def set_controller_torque(name, torque) -> None:
+        if not self.controller_map.is_controller_live(name):
+            self.controller_map.make_live(name)
+        self.controller_map.controller_object_by_controller_name.control_data.set_torque(tor=torque)
 
-    def test_velocity_and_print_position(self) -> None:
-        velocities = [0.2, 0.0, -0.2, 0.0]
-        for i in range(5):
-            for velocity in velocities:
-                for servo in servos:
-                    servo.set_velocity(velocity)
-                for j in range(50):
-                    for servo in servos:
-                        servo.print_position()
-                        servo.update()
-                    time.sleep(0.02)
+    def set_controller_velocity(name, velocity) -> None:
+        if not self.controller_map.is_controller_live(name):
+            self.controller_map.make_live(name)
+        self.controller_map.controller_object_by_controller_name.control_data.set_velocity(vel=velocity)
 
-    def test_velocity_and_print_velocity(self) -> None:
-        velocities = [0.2, 0.0, -0.2, 0.0]
-        for i in range(5):
-            for velocity in velocities:
-                for servo in servos:
-                    servo.set_velocity(velocity)
-                for j in range(50):
-                    for servo in servos:
-                        servo.print_velocity()
-                        servo.update()
-                    time.sleep(0.02)
-
-    def test_position(self) -> None:
-        positions = [0.5, 0.0, -0.5, 0.0]
-        for i in range(5):
-            for position in positions:
-                for servo in servos:
-                    servo.set_position(position)
-                for j in range(50):
-                    for servo in servos:
-                        servo.update()
-                    time.sleep(0.02)
-
-    def test_position_and_print_position(self) -> None:
-        positions = [0.5, 0.0, -0.5, 0.0]
-        for i in range(5):
-            for position in positions:
-                for servo in servos:
-                    servo.set_position(position)
-                for j in range(50):
-                    for servo in servos:
-                        servo.print_position()
-                        servo.update()
-                    time.sleep(0.02)
-
-    def test_position_and_print_velocity(self) -> None:
-        positions = [0.5, 0.0, -0.5, 0.0]
-        for i in range(5):
-            for position in positions:
-                for servo in servos:
-                    servo.set_position(position)
-                for j in range(50):
-                    for servo in servos:
-                        servo.print_velocity()
-                        servo.update()
-                    time.sleep(0.02)
-
+    def set_controller_position(name, position) -> None:
+        if not self.controller_map.is_controller_live(name):
+            self.controller_map.make_live(name)
+        self.controller_map.controller_object_by_controller_name.control_data.set_position(pos=position)
 
 def main():
-    with MoteusBridge() as bridge:
-        bridge.test_position()
-        bridge.test_position_and_print_position()
-        bridge.test_position_and_print_velocity()
-        bridge.test_velocity()
-        bridge.test_velocity_and_print_position()
-        bridge.test_velocity_and_print_velocity()
+    ros_handler = ROSHandler()
 
 
 if __name__ == "__main__":

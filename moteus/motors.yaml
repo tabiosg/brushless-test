@@ -1,0 +1,54 @@
+motors:
+  test: no
+  controllers:
+    - name: "ARM_A"
+      id: 1
+      inversion: 1.0
+    - name: "ARM_B"
+      id: 2
+      inversion: 1.0
+    - name: "ARM_C"
+      id: 3
+      inversion: 1.0
+    - name: "ARM_D"
+      id: 4
+      inversion: 1.0
+    - name: "ARM_E"
+      id: 5
+      inversion: 1.0
+    - name: "ARM_F"
+      id: 6
+      inversion: 1.0
+    - name: "CAROUSEL_MOTOR"
+      id: -1
+      inversion: 1.0
+    - name: "GIMBAL_PITCH"
+      id: -1
+      inversion: 1.0
+    - name: "GIMBAL_YAW"
+      id: -1
+      inversion: 1.0
+    - name: "HAND_FINGER"
+      id: -1
+      inversion: 1.0
+    - name: "HAND_GRIP"
+      id: -1
+      inversion: 1.0
+    - name: "SA_A"
+      id: 1
+      inversion: 1.0
+    - name: "SA_B"
+      id: 2
+      inversion: 1.0
+    - name: "SA_C"
+      id: 3
+      inversion: 1.0
+    - name: "SA_E"
+      id: 5
+      inversion: 1.0
+    - name: "SCIENCE_HAND_SCOOP"
+      id: -1
+      inversion: 1.0
+    - name: "SCIENCE_HAND_SENSOR"
+      id: -1
+      inversion: 1.0
