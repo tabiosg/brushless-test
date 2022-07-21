@@ -33,32 +33,7 @@ class ControlData:
         self.ff_torque = 0.0
         self.kp_scale = 0.0
         self.kd_scale = 1.0
-        self.set_velocity(0.0)
-
-    def set_position(self, pos, vel=0.0, max_tor=0.5, ff_tor=0.0, kp=1.0, kd=1.0) -> None:
-        self.position = pos
-        self.velocity = vel
-        self.max_torque = max_tor
-        self.ff_torque = ff_tor
-        self.kp_scale = kp
-        self.kd_scale = kd
-
-    def set_velocity(self, vel=0.0, max_tor=0.5, ff_tor=0.0, kd=1.0) -> None:
-        self.position = math.nan
-        self.velocity = vel
-        self.max_torque = max_tor
-        self.ff_torque = ff_tor
-        self.kp_scale = 0.0
-        self.kd_scale = kd
-
-    def set_torque(self, tor=0.0) -> None:
-        self.position = math.nan
-        self.velocity = 0
-        self.max_torque = abs(tor)
-        self.ff_torque = tor
-        self.kp_scale = 0.0
-        self.kd_scale = 0.0
-
+        self.set_velocity_control(0.0)
 
 class Controller:
 
@@ -67,6 +42,7 @@ class Controller:
     inversion: int
     query_data: moteus.cmd
     control_data: ControlData
+    lock: threading.Lock
 
     def __init__(self, can_id, inversion) -> None:
         self.can_id = can_id
@@ -74,6 +50,7 @@ class Controller:
         self.inversion = inversion
         self.query_data = None
         self.control_data = ControlData()
+        self.lock = threading.Lock()
 
     def __enter__(self):
         self.turn_on()
@@ -81,7 +58,40 @@ class Controller:
     def __exit__(self, exc_type, exc_value, traceback):
         self.turn_off()
 
+    
+    def set_position_control(self, pos, vel=0.0, max_tor=0.5, ff_tor=0.0, kp=1.0, kd=1.0) -> None:
+        self.lock.acquire()
+        self.control_data.position = pos
+        self.control_data.velocity = vel
+        self.control_data.max_torque = max_tor
+        self.control_data.ff_torque = ff_tor
+        self.control_data.kp_scale = kp
+        self.control_data.kd_scale = kd
+        self.lock.release()
+
+    def set_velocity_control(self, vel=0.0, max_tor=0.5, ff_tor=0.0, kd=1.0) -> None:
+        self.lock.acquire()
+        self.control_data.position = math.nan
+        self.control_data.velocity = vel
+        self.control_data.max_torque = max_tor
+        self.control_data.ff_torque = ff_tor
+        self.control_data.kp_scale = 0.0
+        self.control_data.kd_scale = kd
+        self.lock.release()
+
+    def set_torque_control(self, tor=0.0) -> None:
+        self.lock.acquire()
+        self.control_data.position = math.nan
+        self.control_data.velocity = 0
+        self.control_data.max_torque = abs(tor)
+        self.control_data.ff_torque = tor
+        self.control_data.kp_scale = 0.0
+        self.control_data.kd_scale = 0.0
+        self.lock.release()
+
+
     def update(self) -> None:
+        self.lock.acquire()
         self.query_data = self.c.make_position(
             position=self.control_data.position,
             velocity=self.control_data.velocity * self.inversion,
@@ -92,18 +102,19 @@ class Controller:
             watchdog_timeout=10,
             query=True,
         )
+        self.lock.release()
 
     def turn_off(self) -> None:
         # this also clears errors
-        self.c.make_stop()
-        self.control_data.set_velocity(0.0)
+        self.query_data = self.c.make_stop()
+        self.set_velocity_control(0.0)
 
     def turn_on(self) -> None:
         # NOTE: online it says that it connects to an arbitrary can port, prioritizing
-        # the fdcanbus. So I'd assume if we just hooked up can, it would just connect to that.
+        # the fdcanbus. So I'd assume if we just connected to can, it would just connect to that.
         # We can explore this later.
         self.c = moteus.Controller(id=self.can_id)
-        self.control_data.set_velocity(0.0)
+        self.set_velocity_control(0.0)
 
     def get_position(self) -> float:
         if self.query_data is None:
@@ -172,10 +183,10 @@ class MoteusBridge:
     def update(self) -> None:
         if str(self.state) == "OnState":
             errors = self.controller.has_errors()
-
             if errors:
                 self.state.on_event(MoteusEvent.TURN_OFF, self.controller)
                 return
+            self.controller.update()
         else:
             self.state.on_event(MoteusEvent.TURN_ON, self.controller)
 
@@ -223,15 +234,16 @@ class ROSHandler:
         self.start_time = time.process_time()
         self.arm_pos_pub = rospy.Publisher("arm_position", ArmPosition, queue_size=1)
         rospy.Subscriber("arm_open_loop_cmd", ArmOpenLoopCmd, self.arm_open_loop_cmd_callback)
+        rospy.Subscriber("arm_closed_loop_cmd", ArmPosition, self.arm_closed_loop_cmd_callback)
 
     def update_all_controllers(self) -> None:
         for can_id in self.controller_map.live_controller_name_by_id:
             controller_name = self.controller_map.live_controller_name_by_id[can_id]
-
             lost_comms = time.process_time() - self.start_time > 1.0
+            moteus_bridge = self.controller_map.moteus_bridge_by_controller_name[name]
             if lost_comms:
-                self.controller_map.moteus_bridge_by_controller_name[controller_name].state.on_event(MoteusEvent.TURN_OFF)
-            self.controller_map.moteus_bridge_by_controller_name[controller_name].update()
+                moteus_bridge.state.on_event(MoteusEvent.TURN_OFF)
+            moteus_bridge.update()
 
     def publish_all_controllers(self) -> None:
         self.publish_arm_pos_data()
@@ -243,32 +255,41 @@ class ROSHandler:
             ros_msg.joints[index] = self.controller_map.moteus_bridge_by_controller_name[name].controller.get_position()
         self.arm_pos_pub.publish(ros_msg)
 
-    def set_controller_torque(self, name, torque) -> None:
+    def set_controller_torque_control(self, name, torque) -> None:
         if not self.controller_map.is_controller_live(name):
             self.controller_map.make_live(name)
-        self.controller_map.moteus_bridge_by_controller_name[name].controller.control_data.set_torque(tor=torque)
+        moteus_bridge = self.controller_map.moteus_bridge_by_controller_name[name]
+        moteus_bridge.controller.set_torque_control(tor=torque)
 
-    def set_controller_velocity(self, name, velocity) -> None:
+    def set_controller_velocity_control(self, name, velocity) -> None:
         if not self.controller_map.is_controller_live(name):
             self.controller_map.make_live(name)
-        self.controller_map.moteus_bridge_by_controller_name[name].controller.control_data.set_velocity(vel=velocity)
+        moteus_bridge = self.controller_map.moteus_bridge_by_controller_name[name]
+        moteus_bridge.controller.set_velocity_control(vel=velocity)
 
-    def set_controller_position(self, name, position) -> None:
+    def set_controller_position_control(self, name, position) -> None:
         if not self.controller_map.is_controller_live(name):
             self.controller_map.make_live(name)
-        self.controller_map.moteus_bridge_by_controller_name[name].controller.control_data.set_position(pos=position)
+        moteus_bridge = self.controller_map.moteus_bridge_by_controller_name[name]
+        moteus_bridge.controller.set_position_control(pos=position)
 
     def arm_open_loop_cmd_callback(self, ros_msg: ArmOpenLoopCmd) -> None:
         arm_names = ["ARM_A", "ARM_B", "ARM_C", "ARM_D", "ARM_E", "ARM_F"]
         for index, name in enumerate(arm_names):
-            self.controller_map.make_live(name)
-            self.controller_map.moteus_bridge_by_controller_name[name].controller.set_velocity(ros_msg.throttle[index])
+            self.set_controller_velocity_control(name, ros_msg.throttles[index])
+
+    def arm_closed_loop_cmd_callback(self, ros_msg: ArmPosition) -> None:
+        arm_names = ["ARM_A", "ARM_B", "ARM_C", "ARM_D", "ARM_E", "ARM_F"]
+        for index, name in enumerate(arm_names):
+            elf.set_controller_position_control(name, ros_msg.joints[index])
 
 
 def main():
-    ros_handler = ROSHandler()
+    rospy.init_node(f"moteus")
     threading._start_new_thread(bridge.update_all_controllers, ())
     threading._start_new_thread(bridge.publish_all_controllers, ())
+    rospy.spin()
+    exit()
 
 if __name__ == "__main__":
     main()

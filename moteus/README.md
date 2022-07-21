@@ -1,5 +1,7 @@
 # Brushless Test
 
-This repository will have testing scripts that can be used to test brushless motors using the moteus controller.
+This repository has potential code that can be used for controlling multiple motors using the moteus.
 
-The code has become very messy, and I don't feel like proof-reading yet... 
+The proposed system looks like the following:
+
+Jetson is connected and daisy-chained to 6 moteus controllers via CAN-FD. Each motor has its own ID.
