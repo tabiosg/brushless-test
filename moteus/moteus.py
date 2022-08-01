@@ -6,10 +6,10 @@ import time
 from enum import Enum
 from typing import Dict
 
-import moteus
 import rospy
-
 from msg import ArmOpenLoopCmd, ArmPosition
+
+import moteus
 
 
 class MoteusEvent(Enum):
@@ -19,38 +19,37 @@ class MoteusEvent(Enum):
 
 class ControlData:
 
+    ff_torque: float
+    kd_scale: float
+    kp_scale: float
+    max_torque: float
     position: float
     velocity: float
-    max_torque: float
-    ff_torque: float
-    kp_scale: float
-    kd_scale: float
 
     def __init__(self) -> None:
+        self.ff_torque = 0.0
+        self.kd_scale = 1.0
+        self.kp_scale = 0.0
+        self.max_torque = 0.5
         self.position = math.nan
         self.velocity = 0.0
-        self.max_torque = 0.5
-        self.ff_torque = 0.0
-        self.kp_scale = 0.0
-        self.kd_scale = 1.0
-        self.set_velocity_control(0.0)
 
 class Controller:
 
-    can_id: int
     c: moteus.Controller
-    inversion: int
-    query_data: moteus.cmd
+    can_id: int
     control_data: ControlData
+    inversion: int
     lock: threading.Lock
+    query_data: moteus.cmd
 
     def __init__(self, can_id, inversion) -> None:
-        self.can_id = can_id
         self.c = None
-        self.inversion = inversion
-        self.query_data = None
+        self.can_id = can_id
         self.control_data = ControlData()
+        self.inversion = inversion
         self.lock = threading.Lock()
+        self.query_data = None
 
     def __enter__(self):
         self.turn_on()
@@ -58,7 +57,26 @@ class Controller:
     def __exit__(self, exc_type, exc_value, traceback):
         self.turn_off()
 
-    
+
+    def get_position(self) -> float:
+        if self.query_data is None:
+            return 0
+
+        return self.query_data.values[moteus.Register.POSITION]
+
+    def get_velocity(self) -> float:
+        if self.query_data is None:
+            return 0
+
+        return self.query_data.values[moteus.Register.VELOCITY]
+
+    def has_errors(self) -> bool:
+        if self.query_data is None:
+            return False
+
+        fault_value = self.query_data.values[moteus.Register.FAULT]
+        return fault_value != 0
+
     def set_position_control(self, pos, vel=0.0, max_tor=0.5, ff_tor=0.0, kp=1.0, kd=1.0) -> None:
         self.lock.acquire()
         self.control_data.position = pos
@@ -89,8 +107,7 @@ class Controller:
         self.control_data.kd_scale = 0.0
         self.lock.release()
 
-
-    def update(self) -> None:
+    def update_controller(self) -> None:
         self.lock.acquire()
         self.query_data = self.c.make_position(
             position=self.control_data.position,
@@ -115,25 +132,6 @@ class Controller:
         # We can explore this later.
         self.c = moteus.Controller(id=self.can_id)
         self.set_velocity_control(0.0)
-
-    def get_position(self) -> float:
-        if self.query_data is None:
-            return 0
-
-        return self.query_data.values[moteus.Register.POSITION]
-
-    def get_velocity(self) -> float:
-        if self.query_data is None:
-            return 0
-
-        return self.query_data.values[moteus.Register.VELOCITY]
-
-    def has_errors(self) -> bool:
-        if self.query_data is None:
-            return False
-
-        fault_value = self.query_data.values[moteus.Register.FAULT]
-        return fault_value != 0
 
 
 class State(object):
@@ -171,32 +169,31 @@ class OffState(State):
 
 class MoteusBridge:
 
-    state: State
-    name: str
     controller: Controller
+    state: State
 
-    def __init__(self, name, id, inversion) -> None:
-        self.state = OffState()
-        self.name = name
+    def __init__(self, id, inversion) -> None:
         self.controller = Controller(id, inversion)
+        self.state = OffState()
 
-    def update(self) -> None:
+    def is_on(self) -> bool:
+        return str(self.state) == "OnState"
+
+    def update_bridge(self) -> None:
         if str(self.state) == "OnState":
             errors = self.controller.has_errors()
             if errors:
                 self.state.on_event(MoteusEvent.TURN_OFF, self.controller)
                 return
-            self.controller.update()
+            self.controller.update_controller()
         else:
             self.state.on_event(MoteusEvent.TURN_ON, self.controller)
 
-    def is_on(self) -> bool:
-        return str(self.state) == "OnState":
-
 
 class ControllerMap:
-    live_controller_name_by_id: Dict[int, str]
+
     id_by_controller_name: Dict[str, int]
+    live_controller_name_by_id: Dict[int, str]
     moteus_bridge_by_controller_name: Dict[str, MoteusBridge]
 
     def __init__(self) -> None:
@@ -212,7 +209,7 @@ class ControllerMap:
             controller_inversion = controller["controller_inversion"]
             self.id_by_controller_name[controller_name] = controller_id
             self.moteus_bridge_by_controller_name[controller_id] = (
-                MoteusBridge(controller_name, controller_id, controller_inversion)
+                MoteusBridge(controller_id, controller_inversion)
             )
 
     def is_controller_live(self, name) -> bool:
@@ -225,70 +222,71 @@ class ControllerMap:
 
 class ROSHandler:
 
-    controller_map: ControllerMap
-    start_time: float
-    arm_pos_pub: rospy.Publisher
+    _arm_pos_pub: rospy.Publisher
+    _controller_map: ControllerMap
+    _start_time: float
 
     def __init__(self) -> None:
-        self.controller_map = ControllerMap()
-        self.start_time = time.process_time()
-        self.arm_pos_pub = rospy.Publisher("arm_position", ArmPosition, queue_size=1)
-        rospy.Subscriber("arm_open_loop_cmd", ArmOpenLoopCmd, self.arm_open_loop_cmd_callback)
-        rospy.Subscriber("arm_closed_loop_cmd", ArmPosition, self.arm_closed_loop_cmd_callback)
+        self._controller_map = ControllerMap()
+        self._start_time = time.process_time()
+        self._arm_pos_pub = rospy.Publisher("arm_position", ArmPosition, queue_size=1)
+        rospy.Subscriber("arm_open_loop_cmd", ArmOpenLoopCmd, self._arm_open_loop_cmd_callback)
+        rospy.Subscriber("arm_closed_loop_cmd", ArmPosition, self._arm_closed_loop_cmd_callback)
 
     def update_all_controllers(self) -> None:
-        for can_id in self.controller_map.live_controller_name_by_id:
-            controller_name = self.controller_map.live_controller_name_by_id[can_id]
-            lost_comms = time.process_time() - self.start_time > 1.0
-            moteus_bridge = self.controller_map.moteus_bridge_by_controller_name[name]
+        for can_id in self._controller_map.live_controller_name_by_id:
+            controller_name = self._controller_map.live_controller_name_by_id[can_id]
+            lost_comms = time.process_time() - self._start_time > 1.0
+            moteus_bridge = self._controller_map.moteus_bridge_by_controller_name[controller_name]
             if lost_comms:
                 moteus_bridge.state.on_event(MoteusEvent.TURN_OFF)
-            moteus_bridge.update()
+            moteus_bridge.update_bridge()
 
     def publish_all_controllers(self) -> None:
-        self.publish_arm_pos_data()
+        self._publish_arm_pos_data()
 
-    def publish_arm_pos_data(self) -> None:
+    def _arm_closed_loop_cmd_callback(self, ros_msg: ArmPosition) -> None:
+        arm_names = ["ARM_A", "ARM_B", "ARM_C", "ARM_D", "ARM_E", "ARM_F"]
+        for index, name in enumerate(arm_names):
+            self._set_controller_position_control(name, ros_msg.joints[index])
+
+    def _arm_open_loop_cmd_callback(self, ros_msg: ArmOpenLoopCmd) -> None:
+        arm_names = ["ARM_A", "ARM_B", "ARM_C", "ARM_D", "ARM_E", "ARM_F"]
+        for index, name in enumerate(arm_names):
+            self._set_controller_velocity_control(name, ros_msg.throttles[index])
+
+    def _publish_arm_pos_data(self) -> None:
         ros_msg = ArmPosition()
         arm_names = ["ARM_A", "ARM_B", "ARM_C", "ARM_D", "ARM_E", "ARM_F"]
         for index, name in enumerate(arm_names):
-            ros_msg.joints[index] = self.controller_map.moteus_bridge_by_controller_name[name].controller.get_position()
-        self.arm_pos_pub.publish(ros_msg)
+            ros_msg.joints[index] = self._controller_map.moteus_bridge_by_controller_name[name].controller.get_position()
+        self._arm_pos_pub.publish(ros_msg)
 
-    def set_controller_torque_control(self, name, torque) -> None:
-        if not self.controller_map.is_controller_live(name):
-            self.controller_map.make_live(name)
-        moteus_bridge = self.controller_map.moteus_bridge_by_controller_name[name]
-        moteus_bridge.controller.set_torque_control(tor=torque)
-
-    def set_controller_velocity_control(self, name, velocity) -> None:
-        if not self.controller_map.is_controller_live(name):
-            self.controller_map.make_live(name)
-        moteus_bridge = self.controller_map.moteus_bridge_by_controller_name[name]
-        moteus_bridge.controller.set_velocity_control(vel=velocity)
-
-    def set_controller_position_control(self, name, position) -> None:
-        if not self.controller_map.is_controller_live(name):
-            self.controller_map.make_live(name)
-        moteus_bridge = self.controller_map.moteus_bridge_by_controller_name[name]
+    def _set_controller_position_control(self, name, position) -> None:
+        if not self._controller_map.is_controller_live(name):
+            self._controller_map.make_live(name)
+        moteus_bridge = self._controller_map.moteus_bridge_by_controller_name[name]
         moteus_bridge.controller.set_position_control(pos=position)
 
-    def arm_open_loop_cmd_callback(self, ros_msg: ArmOpenLoopCmd) -> None:
-        arm_names = ["ARM_A", "ARM_B", "ARM_C", "ARM_D", "ARM_E", "ARM_F"]
-        for index, name in enumerate(arm_names):
-            self.set_controller_velocity_control(name, ros_msg.throttles[index])
+    def _set_controller_torque_control(self, name, torque) -> None:
+        if not self._controller_map.is_controller_live(name):
+            self._controller_map.make_live(name)
+        moteus_bridge = self._controller_map.moteus_bridge_by_controller_name[name]
+        moteus_bridge.controller.set_torque_control(tor=torque)
 
-    def arm_closed_loop_cmd_callback(self, ros_msg: ArmPosition) -> None:
-        arm_names = ["ARM_A", "ARM_B", "ARM_C", "ARM_D", "ARM_E", "ARM_F"]
-        for index, name in enumerate(arm_names):
-            elf.set_controller_position_control(name, ros_msg.joints[index])
+    def _set_controller_velocity_control(self, name, velocity) -> None:
+        if not self._controller_map.is_controller_live(name):
+            self._controller_map.make_live(name)
+        moteus_bridge = self._controller_map.moteus_bridge_by_controller_name[name]
+        moteus_bridge.controller.set_velocity_control(vel=velocity)
 
 
 def main():
     rospy.init_node(f"moteus")
-    threading._start_new_thread(bridge.update_all_controllers, ())
-    threading._start_new_thread(bridge.publish_all_controllers, ())
-    rospy.spin()
+    with ROSHandler() as ros:
+        threading._start_new_thread(ros.update_all_controllers, ())
+        threading._start_new_thread(ros.publish_all_controllers, ())
+        rospy.spin()
     exit()
 
 if __name__ == "__main__":
