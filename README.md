@@ -48,3 +48,11 @@ One should also configure the CAN Transceiver in software. I have not done enoug
 ## Connecting CAN-FD Lines
 
 Not exactly sure what the best way to connect the CAN lines in our system yet. Maybe daisy chaining everything is sufficient?
+
+## Limit Switches
+
+The moteus has GPIO digital inputs (aux 1 and aux 2). This code currently has the outline for using limit switches, but it not be worth having a system with limit switches.
+
+One issue with limit switches is that there is probably not an easy method of making the inputs pulled high or pulled low. From the demo video, it might just be pulled low by default, but I am unsure.
+
+One solution to avoiding using limit switches is using the moteus library. The moteus allows one to set position_min and position_max, but that only stops movement for position control mode (unless velocity control mode is considered a position control mode?).
