@@ -51,8 +51,10 @@ Not exactly sure what the best way to connect the CAN lines in our system yet. M
 
 ## Limit Switches
 
-The moteus has GPIO digital inputs (aux 1 and aux 2). This code currently has the outline for using limit switches, but it not be worth having a system with limit switches.
+The moteus has GPIO digital inputs (aux 1 and aux 2). This code currently has the outline for using limit switches, but it might be more complicated than expected.
 
-One issue with limit switches is that there is probably not an easy method of making the inputs pulled high or pulled low. From the demo video, it might just be pulled low by default, but I am unsure.
+One thing to know is whether to set the input as pull up or pull down depending on whether we intend for it to be active low or active high. See [here](https://github.com/mjbots/moteus/blob/main/docs/reference.md#pin-configuration) for more information on how to configure the pins.
 
-One solution to avoiding using limit switches is using the moteus library. The moteus allows one to set position_min and position_max, but that only stops movement for position control mode (unless velocity control mode is considered a position control mode?).
+One issue is that if we can check prevent velocity commands by checking the sign of velocity. However, this is not valid for position control since the velocity is still 0. One solution is to compare the current position with the requested position. Another solution is explained below.
+
+The other solution is using the moteus library. The moteus allows one to set position_min and position_max, but that only stops movement for position control mode (unless velocity control mode is considered a position control mode?).

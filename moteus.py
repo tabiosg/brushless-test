@@ -61,7 +61,7 @@ class Controller:
             for limit in controller["limits"]:
                 if limit == "neg":
                     self.has_limit_negative = True
-                if limit == "pos":
+                elif limit == "pos":
                     self.has_limit_positive = True
         self.inversion = controller["inversion"]
         self.limit_negative = False
@@ -127,12 +127,11 @@ class Controller:
         self.lock.release()
 
     def update_limit(self) -> None:
-        # TODO - Perhaps limit switches are not good for this design.
-        # There is currently no way to pull up or pull down a GPIO input on the moteus. 
         if not self.has_limit_negative and not self.has_limit_positive:
             return
         bytes_object = self.c.read_gpio()
         # TODO - Figure out how to parse this bytes object
+        # TODO - Figure out if it should be active low or high
         self.limit_negative = False  # TODO - eventually change
         self.limit_positive = False # TODO - eventually change
 
