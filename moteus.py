@@ -4,12 +4,11 @@ import math
 import threading
 import time
 from enum import Enum
-from typing import Dict
-
-import rospy
-from msg import ArmOpenLoopCmd, ArmPosition
+from typing import Dict, List, TypedDict
 
 import moteus
+import rospy
+from msg import ArmOpenLoopCmd, ArmPosition
 
 
 class MoteusEvent(Enum):
@@ -34,21 +33,41 @@ class ControlData:
         self.position = math.nan
         self.velocity = 0.0
 
+
+class ControllerDict(TypedDict, total=False):
+    name: str
+    node_id: int
+    inversion: int
+    limits: List[str]
+
+
 class Controller:
 
     c: moteus.Controller
-    can_id: int
     control_data: ControlData
     inversion: int
+    limit_negative: bool
+    limit_positive: bool
     lock: threading.Lock
+    node_id: int
     query_data: moteus.cmd
 
-    def __init__(self, can_id, inversion) -> None:
+    def __init__(self, controller: ControllerDict) -> None:
         self.c = None
-        self.can_id = can_id
         self.control_data = ControlData()
-        self.inversion = inversion
+        self.has_limit_negative = False
+        self.has_limit_positive = False
+        if "limits" in controller:
+            for limit in controller["limits"]:
+                if limit == "neg":
+                    self.has_limit_negative = True
+                if limit == "pos":
+                    self.has_limit_positive = True
+        self.inversion = controller["inversion"]
+        self.limit_negative = False
+        self.limit_positive = False
         self.lock = threading.Lock()
+        self.node_id = controller["node_id"]
         self.query_data = None
 
     def __enter__(self):
@@ -107,8 +126,26 @@ class Controller:
         self.control_data.kd_scale = 0.0
         self.lock.release()
 
-    def update_controller(self) -> None:
+    def update_limit(self) -> None:
+        # TODO - Perhaps limit switches are not good for this design.
+        # There is currently no way to pull up or pull down a GPIO input on the moteus. 
+        if not self.has_limit_negative and not self.has_limit_positive:
+            return
+        bytes_object = self.c.read_gpio()
+        # TODO - Figure out how to parse this bytes object
+        self.limit_negative = False  # TODO - eventually change
+        self.limit_positive = False # TODO - eventually change
+
+
+    def update_speed(self) -> None:
         self.lock.acquire()
+        if (
+            (self.limit_negative and self.control_data.velocity < 0)
+            or (self.limit_positive and self.control_data.velocity > 0)
+        ):
+            self.set_velocity_control(vel=0.0)
+            # TODO - Fix for closed. This code only protects open-loop.
+            # This is because vel can be set as 0.0 in positive control mode.
         self.query_data = self.c.make_position(
             position=self.control_data.position,
             velocity=self.control_data.velocity * self.inversion,
@@ -130,7 +167,7 @@ class Controller:
         # NOTE: online it says that it connects to an arbitrary can port, prioritizing
         # the fdcanbus. So I'd assume if we just connected to can, it would just connect to that.
         # We can explore this later.
-        self.c = moteus.Controller(id=self.can_id)
+        self.c = moteus.Controller(id=self.node_id)
         self.set_velocity_control(0.0)
 
 
@@ -172,8 +209,8 @@ class MoteusBridge:
     controller: Controller
     state: State
 
-    def __init__(self, id, inversion) -> None:
-        self.controller = Controller(id, inversion)
+    def __init__(self, controller: ControllerDict) -> None:
+        self.controller = Controller(controller)
         self.state = OffState()
 
     def is_on(self) -> bool:
@@ -185,7 +222,8 @@ class MoteusBridge:
             if errors:
                 self.state.on_event(MoteusEvent.TURN_OFF, self.controller)
                 return
-            self.controller.update_controller()
+            self.controller.update_limit()
+            self.controller.update_speed()
         else:
             self.state.on_event(MoteusEvent.TURN_ON, self.controller)
 
@@ -205,18 +243,21 @@ class ControllerMap:
 
         for controller in list_of_controllers:
             controller_name = controller["name"]
-            controller_id = controller["id"]
-            controller_inversion = controller["controller_inversion"]
+            controller_id = controller["node_id"]
             self.id_by_controller_name[controller_name] = controller_id
-            self.moteus_bridge_by_controller_name[controller_id] = (
-                MoteusBridge(controller_id, controller_inversion)
+            self.moteus_bridge_by_controller_name[controller_name] = (
+                MoteusBridge(controller)
             )
 
     def is_controller_live(self, name) -> bool:
         return name == self.live_controller_name_by_id[self.id_by_controller_name[name]]
 
     def make_live(self, name) -> None:
-        self.moteus_bridge_by_controller_name[name].state.on_event(MoteusEvent.TURN_ON)
+        moteus_bridge = self.moteus_bridge_by_controller_name[name]
+        moteus_bridge.state.on_event(
+            MoteusEvent.TURN_ON,
+            moteus_bridge.controller
+        )
         self.live_controller_name_by_id[self.id_by_controller_name[name]] = name
 
 
@@ -234,12 +275,12 @@ class ROSHandler:
         rospy.Subscriber("arm_closed_loop_cmd", ArmPosition, self._arm_closed_loop_cmd_callback)
 
     def update_all_controllers(self) -> None:
-        for can_id in self._controller_map.live_controller_name_by_id:
-            controller_name = self._controller_map.live_controller_name_by_id[can_id]
+        for node_id in self._controller_map.live_controller_name_by_id:
+            controller_name = self._controller_map.live_controller_name_by_id[node_id]
             lost_comms = time.process_time() - self._start_time > 1.0
             moteus_bridge = self._controller_map.moteus_bridge_by_controller_name[controller_name]
             if lost_comms:
-                moteus_bridge.state.on_event(MoteusEvent.TURN_OFF)
+                moteus_bridge.state.on_event(MoteusEvent.TURN_OFF, moteus_bridge.controller)
             moteus_bridge.update_bridge()
 
     def publish_all_controllers(self) -> None:
@@ -259,7 +300,9 @@ class ROSHandler:
         ros_msg = ArmPosition()
         arm_names = ["ARM_A", "ARM_B", "ARM_C", "ARM_D", "ARM_E", "ARM_F"]
         for index, name in enumerate(arm_names):
-            ros_msg.joints[index] = self._controller_map.moteus_bridge_by_controller_name[name].controller.get_position()
+            ros_msg.joints[index] = (
+                self._controller_map.moteus_bridge_by_controller_name[name].controller.get_position()
+            )
         self._arm_pos_pub.publish(ros_msg)
 
     def _set_controller_position_control(self, name, position) -> None:
