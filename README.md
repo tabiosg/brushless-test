@@ -58,3 +58,9 @@ One thing to know is whether to set the input as pull up or pull down depending 
 One issue is that if we can check prevent velocity commands by checking the sign of velocity. However, this is not valid for position control since the velocity is still 0. One solution is to compare the current position with the requested position. Another solution is explained below.
 
 The other solution is using the moteus library. The moteus allows one to set position_min and position_max, but that only stops movement for position control mode (unless velocity control mode is considered a position control mode?).
+
+## TODO
+
+- [ ] Research why we need async (can we just do make_position). If we need it, then we change code
+- [ ] Publish state data
+- [ ] Try to get influenced from some tested code that was made [here](https://github.com/tabiosg/mrover-workspace/tree/moteus_test_august_22)
