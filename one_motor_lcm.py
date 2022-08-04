@@ -4,7 +4,7 @@ from rover_common.aiohelper import run_coroutines
 from rover_common import aiolcm
 import lcm
 import moteus
-from rover_msgs import RAOpenLoopCmd
+from rover_msgs import RAOpenLoopCmd, RAPosition
 
 c = moteus.Controller()
 filtered_vel = 0
@@ -36,6 +36,9 @@ async def loop():
         if mode == 1 or mode == 11:
             await c.set_stop()
             print(f"Mode: {mode}")
+        msg = RAPosition()
+        msg.joint_a = state.values[moteus.Register.POSITION]
+        lcm_.publish("/ra_position", msg.encode())
 
 
 def main():
