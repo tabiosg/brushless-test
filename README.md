@@ -64,3 +64,4 @@ The other solution is using the moteus library. The moteus allows one to set pos
 - [ ] Research why we need async (can we just do make_position). If we need it, then we change code
 - [ ] Publish state data
 - [ ] Try to get influenced from some tested code that was made [here](https://github.com/tabiosg/mrover-workspace/tree/moteus_test_august_22)
+- [ ] Need to really think hard about how the code should be

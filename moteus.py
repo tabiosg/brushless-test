@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import asyncio
 import math
 import threading
 import time
@@ -69,11 +70,9 @@ class Controller:
         self.lock = threading.Lock()
         self.node_id = controller["node_id"]
         self.query_data = None
-
-    def __enter__(self):
         self.turn_on()
 
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __del__(self, exc_type, exc_value, traceback):
         self.turn_off()
 
 
@@ -323,13 +322,21 @@ class ROSHandler:
         moteus_bridge.controller.set_velocity_control(vel=velocity)
 
 
+
+async def loop(ros: ROSHandler):
+    try:
+        while not rospy.is_shutdown():
+            ros.update_all_controllers()
+            ros.publish_all_controllers()
+    finally:
+        # TODO - shut down all motors at end by setting stop
+        pass
+
+
 def main():
     rospy.init_node(f"moteus")
-    with ROSHandler() as ros:
-        threading._start_new_thread(ros.update_all_controllers, ())
-        threading._start_new_thread(ros.publish_all_controllers, ())
-        rospy.spin()
-    exit()
+    ros = ROSHandler()
+    asyncio.run(loop(ros))
 
 if __name__ == "__main__":
     main()
